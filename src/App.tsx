@@ -33,20 +33,55 @@ export default function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDeleting, setIsDeleting] = useState<number | null>(null);
-  const [contractAddress, setContractAddress] = useState(CONTRACT_ADDRESS);
   const [isContractValid, setIsContractValid] = useState<boolean | null>(null);
   const [isDemoMode, setIsDemoMode] = useState(false);
+  const [currentChainId, setCurrentChainId] = useState<string | null>(null);
+
+  const switchNetwork = async () => {
+    if (!window.ethereum) return;
+    try {
+      await window.ethereum.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: '0xaa36a7' }], // 11155111 in hex
+      });
+    } catch (switchError: any) {
+      if (switchError.code === 4902) {
+        try {
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [
+              {
+                chainId: '0xaa36a7',
+                chainName: 'Sepolia Test Network',
+                nativeCurrency: { name: 'Sepolia ETH', symbol: 'ETH', decimals: 18 },
+                rpcUrls: ['https://rpc.sepolia.org'],
+                blockExplorerUrls: ['https://sepolia.etherscan.io'],
+              },
+            ],
+          });
+        } catch (addError) {
+          console.error("Failed to add network:", addError);
+        }
+      }
+    }
+  };
 
   const checkContract = async (address: string) => {
     if (!window.ethereum) return;
     try {
       const provider = new ethers.BrowserProvider(window.ethereum);
+      const network = await provider.getNetwork();
+      const chainIdStr = network.chainId.toString();
+      setCurrentChainId(chainIdStr);
+      
+      if (chainIdStr !== "11155111") {
+        setIsContractValid(false);
+        return false;
+      }
+
       const code = await provider.getCode(address);
       const isValid = code !== "0x" && code !== "0x0";
       setIsContractValid(isValid);
-      if (!isValid) {
-        toast.error("No contract found at this address on the current network.", { id: "contract-check" });
-      }
       return isValid;
     } catch (error) {
       setIsContractValid(false);
@@ -74,18 +109,15 @@ export default function App() {
   };
 
   const getContract = async (withSigner = false) => {
-    if (!window.ethereum || !contractAddress || !ethers.isAddress(contractAddress)) {
-      if (!ethers.isAddress(contractAddress) && contractAddress !== "") {
-        toast.error("Invalid contract address format.");
-      }
+    if (!window.ethereum || !CONTRACT_ADDRESS || !ethers.isAddress(CONTRACT_ADDRESS)) {
       return null;
     }
     const provider = new ethers.BrowserProvider(window.ethereum);
     if (withSigner) {
       const signer = await provider.getSigner();
-      return new ethers.Contract(contractAddress, CONTRACT_ABI, signer);
+      return new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
     }
-    return new ethers.Contract(contractAddress, CONTRACT_ABI, provider);
+    return new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
   };
 
   const fetchExpenses = async () => {
@@ -101,7 +133,7 @@ export default function App() {
     try {
       setIsLoading(true);
       
-      const isValid = await checkContract(contractAddress);
+      const isValid = await checkContract(CONTRACT_ADDRESS);
       if (!isValid) {
         setExpenses([]);
         return;
@@ -132,6 +164,30 @@ export default function App() {
       setIsLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (account) {
+      fetchExpenses();
+    }
+  }, [account, isDemoMode]);
+
+  useEffect(() => {
+    if (window.ethereum) {
+      const handleChainChanged = () => window.location.reload();
+      const handleAccountsChanged = (accounts: string[]) => {
+        if (accounts.length > 0) setAccount(accounts[0]);
+        else setAccount(null);
+      };
+
+      window.ethereum.on('chainChanged', handleChainChanged);
+      window.ethereum.on('accountsChanged', handleAccountsChanged);
+
+      return () => {
+        window.ethereum.removeListener('chainChanged', handleChainChanged);
+        window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
+      };
+    }
+  }, []);
 
   const addExpense = async (amount: number, category: Category, description: string) => {
     if (isDemoMode) {
@@ -206,20 +262,6 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    if (account) {
-      fetchExpenses();
-    }
-  }, [account]);
-
-  useEffect(() => {
-    if (window.ethereum) {
-      window.ethereum.on("accountsChanged", (accounts: string[]) => {
-        setAccount(accounts[0] || null);
-      });
-    }
-  }, []);
-
   const stats = useMemo<SummaryStats>(() => {
     const total = expenses.reduce((sum, e) => sum + e.amount, 0);
     
@@ -289,78 +331,44 @@ export default function App() {
 
             <Dashboard stats={stats} />
             
-            <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-700 p-8">
-              <div className="mb-8 p-6 bg-amber-50 dark:bg-amber-900/20 border-2 border-dashed border-amber-200 dark:border-amber-800 rounded-3xl">
-                <div className="flex items-start gap-4">
-                  <div className={`mt-1 w-3 h-3 rounded-full shrink-0 ${isContractValid ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]' : 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]'}`} />
-                  <div className="flex-1">
-                    <h4 className="text-lg font-bold text-amber-900 dark:text-amber-100 mb-1">
-                      Blockchain Configuration
-                    </h4>
-                    <p className="text-sm text-amber-700 dark:text-amber-400 mb-4">
-                      {isContractValid 
-                        ? "Connected to smart contract. Your data is being synced with the blockchain."
-                        : "To start tracking expenses, you need to provide the address of your deployed ExpenseTracker smart contract."}
-                    </p>
-                    
-                    <div className="flex flex-col sm:flex-row gap-3">
-                      <div className="relative flex-1">
-                        <input
-                          type="text"
-                          value={contractAddress}
-                          disabled={isDemoMode}
-                          onChange={(e) => setContractAddress(e.target.value)}
-                          placeholder={isDemoMode ? "Demo Mode Active" : "Contract Address (0x...)"}
-                          className="w-full px-4 py-3 bg-white dark:bg-gray-900 border-2 border-amber-100 dark:border-amber-800 rounded-2xl text-sm outline-none focus:border-blue-500 transition-all font-mono disabled:opacity-50"
-                        />
-                      </div>
-                      <div className="flex gap-2">
-                        {!isDemoMode && (
-                          <button
-                            onClick={() => fetchExpenses()}
-                            className="px-6 py-3 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl text-sm font-bold transition-all shadow-lg shadow-amber-600/20 active:scale-95"
-                          >
-                            Sync Contract
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            setIsDemoMode(!isDemoMode);
-                            toast.success(isDemoMode ? "Switched to Blockchain Mode" : "Switched to Demo Mode");
-                          }}
-                          className={`px-6 py-3 rounded-2xl text-sm font-bold transition-all active:scale-95 ${
-                            isDemoMode 
-                              ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" 
-                              : "bg-white dark:bg-gray-800 border-2 border-blue-200 dark:border-blue-900 text-blue-700 dark:text-blue-400"
-                          }`}
-                        >
-                          {isDemoMode ? "Exit Demo Mode" : "Try Demo Mode"}
-                        </button>
-                      </div>
-                    </div>
-                    
-                    <div className="mt-6 pt-6 border-t border-amber-200/50 dark:border-amber-800/50">
-                      <h5 className="text-xs font-bold text-amber-800 dark:text-amber-300 uppercase tracking-wider mb-3">
-                        Where to find your address?
-                      </h5>
-                      <ul className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <li className="text-xs text-amber-700 dark:text-amber-400 flex gap-2">
-                          <span className="font-bold">1. Terminal:</span> 
-                          Look for "ExpenseTracker deployed to: 0x..." after running your deploy script.
-                        </li>
-                        <li className="text-xs text-amber-700 dark:text-amber-400 flex gap-2">
-                          <span className="font-bold">2. Etherscan:</span> 
-                          Search your wallet on Sepolia Etherscan and look for "Contract Creation".
-                        </li>
-                        <li className="text-xs text-amber-700 dark:text-amber-400 flex gap-2">
-                          <span className="font-bold">3. MetaMask:</span> 
-                          Check your "Activity" tab for the "Contract Deployment" transaction.
-                        </li>
-                      </ul>
-                    </div>
+            {!isContractValid && !isDemoMode && account && (
+              <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-700 p-8 mb-8">
+                <div className="p-6 bg-amber-50 dark:bg-amber-900/20 border-2 border-dashed border-amber-200 dark:border-amber-800 rounded-3xl text-center">
+                  <h4 className="text-lg font-bold text-amber-900 dark:text-amber-100 mb-2">
+                    {currentChainId !== "11155111" ? "Wrong Network Detected" : "Contract Not Found"}
+                  </h4>
+                  <p className="text-sm text-amber-700 dark:text-amber-400 mb-6">
+                    {currentChainId !== "11155111" 
+                      ? `You are on Chain ID ${currentChainId}. Please switch to Sepolia Test Network (11155111).`
+                      : `No contract found at ${CONTRACT_ADDRESS}. Make sure your contract is deployed to Sepolia.`}
+                  </p>
+                  
+                  <div className="flex justify-center gap-4">
+                    {currentChainId !== "11155111" ? (
+                      <button
+                        onClick={switchNetwork}
+                        className="px-8 py-3 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl text-sm font-bold transition-all shadow-lg shadow-amber-600/20"
+                      >
+                        Switch to Sepolia (11155111)
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => fetchExpenses()}
+                        className="px-8 py-3 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl text-sm font-bold transition-all shadow-lg shadow-amber-600/20"
+                      >
+                        Retry Sync
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setIsDemoMode(true)}
+                      className="px-8 py-3 bg-white dark:bg-gray-900 border-2 border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-100 rounded-2xl text-sm font-bold transition-all"
+                    >
+                      Try Demo Mode
+                    </button>
                   </div>
                 </div>
               </div>
+            )}
 
               <ExpenseList 
                 expenses={expenses} 
@@ -368,9 +376,8 @@ export default function App() {
                 isDeleting={isDeleting}
               />
             </div>
-          </div>
-        )}
-      </main>
+          )}
+        </main>
 
       <AddExpenseModal
         isOpen={isModalOpen}
